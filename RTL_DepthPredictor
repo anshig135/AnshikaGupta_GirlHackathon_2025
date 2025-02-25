@@ -1,0 +1,583 @@
+!pip install pandas numpy scikit-learn networkx matplotlib seaborn torch
+import pandas as pd
+import numpy as np
+from sklearn.model_selection import train_test_split, cross_val_score, GridSearchCV
+from sklearn.preprocessing import StandardScaler
+from sklearn.ensemble import RandomForestRegressor, GradientBoostingRegressor
+from sklearn.neural_network import MLPRegressor
+from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
+from sklearn.pipeline import Pipeline
+import re
+from typing import List, Dict, Tuple, Optional
+import networkx as nx
+import matplotlib.pyplot as plt
+import seaborn as sns
+from pathlib import Path
+import json
+import logging
+from dataclasses import dataclass
+import torch
+import torch.nn as nn
+from torch.utils.data import Dataset, DataLoader
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+@dataclass
+class RTLSignalFeatures:
+    """Dataclass to store extracted features for a signal"""
+    basic_operators: Dict[str, int]
+    control_flow: Dict[str, int]
+    arithmetic: Dict[str, int]
+    graph_metrics: Dict[str, float]
+    structural: Dict[str, int]
+
+class RTLDataset(Dataset):
+    """PyTorch Dataset for RTL features"""
+    def __init__(self, features: np.ndarray, depths: np.ndarray):
+        self.features = torch.FloatTensor(features)
+        self.depths = torch.FloatTensor(depths)
+        
+    def __len__(self):
+        return len(self.features)
+        
+    def __getitem__(self, idx):
+        return self.features[idx], self.depths[idx]
+
+class DeepRTLNet(nn.Module):
+    """Deep neural network for RTL depth prediction"""
+    def __init__(self, input_size):
+        super().__init__()
+        self.network = nn.Sequential(
+            nn.Linear(input_size, 128),
+            nn.ReLU(),
+            nn.Dropout(0.3),
+            nn.Linear(128, 64),
+            nn.ReLU(),
+            nn.Dropout(0.2),
+            nn.Linear(64, 32),
+            nn.ReLU(),
+            nn.Linear(32, 1)
+        )
+        
+    def forward(self, x):
+        return self.network(x)
+
+class EnhancedRTLDepthPredictor:
+    def __init__(self, model_type: str = 'random_forest'):
+        """
+        Initialize predictor with specified model type.
+        
+        Args:
+            model_type: One of 'random_forest', 'gradient_boosting', 'neural_net', 'deep_net'
+        """
+        self.model_type = model_type
+        self.models = {
+            'random_forest': RandomForestRegressor(n_estimators=100, random_state=42),
+            'gradient_boosting': GradientBoostingRegressor(random_state=42),
+            'neural_net': MLPRegressor(hidden_layer_sizes=(100, 50), max_iter=1000),
+            'deep_net': None  # Initialized during training
+        }
+        self.model = self.models.get(model_type)
+        self.scaler = StandardScaler()
+        self.feature_importance = None
+        
+    def extract_advanced_features(self, rtl_code: str, target_signal: str) -> RTLSignalFeatures:
+        """
+        Extract comprehensive features from RTL code.
+        """
+        # Basic operator analysis
+        basic_ops = {
+            'and_count': len(re.findall(r'&(?!&)', rtl_code)),
+            'or_count': len(re.findall(r'\|(?!\|)', rtl_code)),
+            'not_count': len(re.findall(r'~', rtl_code)),
+            'xor_count': len(re.findall(r'\^', rtl_code)),
+            'buffer_count': len(re.findall(r'buf\s*\(', rtl_code))
+        }
+        
+        # Control flow analysis
+        control_flow = {
+            'if_count': len(re.findall(r'if\s*\(', rtl_code)),
+            'else_count': len(re.findall(r'else\s*', rtl_code)),
+            'case_count': len(re.findall(r'case\s*\(', rtl_code)),
+            'default_count': len(re.findall(r'default\s*:', rtl_code)),
+            'conditional_count': len(re.findall(r'\?', rtl_code))
+        }
+        
+        # Arithmetic complexity
+        arithmetic = {
+            'add_sub_count': len(re.findall(r'[+-](?![+=])', rtl_code)),
+            'mult_count': len(re.findall(r'\*(?!\*)', rtl_code)),
+            'div_count': len(re.findall(r'/(?!/)', rtl_code)),
+            'shift_count': len(re.findall(r'<<|>>', rtl_code))
+        }
+        
+        # Create and analyze dependency graph
+        G = self._create_enhanced_dependency_graph(rtl_code)
+        graph_metrics = self._analyze_graph_metrics(G, target_signal)
+        
+        # Structural analysis
+        structural = self._analyze_structural_features(rtl_code, target_signal)
+        
+        return RTLSignalFeatures(
+            basic_operators=basic_ops,
+            control_flow=control_flow,
+            arithmetic=arithmetic,
+            graph_metrics=graph_metrics,
+            structural=structural
+        )
+    
+    def _create_enhanced_dependency_graph(self, rtl_code: str) -> nx.DiGraph:
+        """
+        Create a more sophisticated dependency graph with weighted edges.
+        """
+        G = nx.DiGraph()
+        
+        # Parse module ports
+        ports = re.findall(r'(input|output|inout)\s+(?:reg|wire)?\s*(?:\[[^\]]+\])?\s*(\w+)', rtl_code)
+        for port_type, port_name in ports:
+            G.add_node(port_name, type=port_type)
+        
+        # Parse assignments with weights based on complexity
+        assignments = re.findall(r'(\w+)\s*<=\s*(.+?);', rtl_code)
+        for target, expr in assignments:
+            signals = re.findall(r'\b(\w+)\b', expr)
+            complexity = self._calculate_expression_complexity(expr)
+            
+            for signal in signals:
+                if signal != target:
+                    G.add_edge(signal, target, weight=complexity)
+        
+        return G
+    
+    def _calculate_expression_complexity(self, expr: str) -> float:
+        """
+        Calculate complexity score for an expression.
+        """
+        complexity = 1.0
+        
+        # Increase complexity for operators
+        complexity += len(re.findall(r'[&|^~+-/*]', expr)) * 0.5
+        complexity += len(re.findall(r'<<|>>', expr)) * 0.7
+        complexity += len(re.findall(r'\?', expr)) * 1.0
+        
+        return complexity
+    
+    def _analyze_graph_metrics(self, G: nx.DiGraph, target_signal: str) -> Dict[str, float]:
+            """
+            Calculate advanced graph metrics for the target signal.
+            """
+            metrics = {
+                'fan_in': 0,
+                'fan_out': 0,
+                'avg_path_length': 0,
+                'max_path_length': 0,
+                'centrality': 0,
+                'clustering_coeff': 0
+            }
+
+            if target_signal not in G:
+                return metrics
+
+            try:
+                metrics['fan_in'] = G.in_degree(target_signal)
+                metrics['fan_out'] = G.out_degree(target_signal)
+
+                # Path analysis - fixed generator handling
+                paths = dict(nx.single_target_shortest_path_length(G, target_signal))
+                if paths:
+                    path_lengths = list(paths.values())
+                    metrics['avg_path_length'] = np.mean(path_lengths)
+                    metrics['max_path_length'] = max(path_lengths)
+
+                # Centrality measures
+                metrics['centrality'] = nx.degree_centrality(G)[target_signal]
+                metrics['clustering_coeff'] = nx.clustering(G, target_signal)
+
+            except nx.NetworkXError as e:
+                logger.warning(f"Graph analysis error for {target_signal}: {e}")
+
+            return metrics
+    
+    def _analyze_structural_features(self, rtl_code: str, target_signal: str) -> Dict[str, int]:
+        """
+        Analyze structural features of the RTL code.
+        """
+        return {
+            'module_depth': len(re.findall(r'module\s+\w+', rtl_code)),
+            'always_blocks': len(re.findall(r'always\s*@', rtl_code)),
+            'sequential_logic': len(re.findall(rf'{target_signal}\s*<=', rtl_code)),
+            'combinational_logic': len(re.findall(rf'{target_signal}\s*=', rtl_code)),
+            'parameter_count': len(re.findall(r'parameter\s+\w+', rtl_code))
+        }
+    
+    def prepare_advanced_dataset(self, rtl_files: List[str], target_signals: List[str],
+                               actual_depths: List[int]) -> Tuple[pd.DataFrame, np.ndarray]:
+        """
+        Prepare dataset with advanced feature extraction.
+        """
+        features_list = []
+        
+        for rtl, signal in zip(rtl_files, target_signals):
+            features = self.extract_advanced_features(rtl, signal)
+            # Flatten features
+            flat_features = {
+                **{f"basic_{k}": v for k, v in features.basic_operators.items()},
+                **{f"ctrl_{k}": v for k, v in features.control_flow.items()},
+                **{f"arith_{k}": v for k, v in features.arithmetic.items()},
+                **{f"graph_{k}": v for k, v in features.graph_metrics.items()},
+                **{f"struct_{k}": v for k, v in features.structural.items()}
+            }
+            features_list.append(flat_features)
+            
+        X = pd.DataFrame(features_list)
+        y = np.array(actual_depths)
+        
+        return X, y
+    
+    def train(self, X: pd.DataFrame, y: np.ndarray, deep_learning_params: Optional[Dict] = None):
+        """
+        Train the selected model with advanced options.
+        """
+        X_train, X_test, y_train, y_test = train_test_split(
+            X, y, test_size=0.2, random_state=42
+        )
+        
+        # Scale features
+        X_train_scaled = self.scaler.fit_transform(X_train)
+        X_test_scaled = self.scaler.transform(X_test)
+        
+        if self.model_type == 'deep_net':
+            return self._train_deep_network(X_train_scaled, y_train, X_test_scaled, y_test,
+                                         deep_learning_params or {})
+        
+        # Grid search for hyperparameter tuning
+        param_grid = self._get_param_grid()
+        if param_grid:
+            grid_search = GridSearchCV(self.model, param_grid, cv=5)
+            grid_search.fit(X_train_scaled, y_train)
+            self.model = grid_search.best_estimator_
+        else:
+            self.model.fit(X_train_scaled, y_train)
+        
+        # Calculate feature importance for tree-based models
+        if hasattr(self.model, 'feature_importances_'):
+            self.feature_importance = dict(zip(X.columns, self.model.feature_importances_))
+        
+        # Evaluate
+        y_pred = self.model.predict(X_test_scaled)
+        metrics = self._calculate_metrics(y_test, y_pred)
+        
+        # Perform cross-validation
+        cv_scores = cross_val_score(self.model, X_train_scaled, y_train, cv=5)
+        metrics['cv_mean'] = cv_scores.mean()
+        metrics['cv_std'] = cv_scores.std()
+        
+        return metrics
+    
+    def _train_deep_network(self, X_train: np.ndarray, y_train: np.ndarray,
+                           X_test: np.ndarray, y_test: np.ndarray,
+                           params: Dict) -> Dict:
+        """
+        Train a deep neural network using PyTorch.
+        """
+        # Create datasets and dataloaders
+        train_dataset = RTLDataset(X_train, y_train)
+        test_dataset = RTLDataset(X_test, y_test)
+        train_loader = DataLoader(train_dataset, batch_size=32, shuffle=True)
+        test_loader = DataLoader(test_dataset, batch_size=32)
+        
+        # Initialize model
+        self.model = DeepRTLNet(input_size=X_train.shape[1])
+        optimizer = torch.optim.Adam(self.model.parameters(), lr=params.get('lr', 0.001))
+        criterion = nn.MSELoss()
+        
+        # Training loop
+        n_epochs = params.get('epochs', 100)
+        best_loss = float('inf')
+        patience = params.get('patience', 10)
+        patience_counter = 0
+        
+        for epoch in range(n_epochs):
+            self.model.train()
+            train_loss = 0
+            for X_batch, y_batch in train_loader:
+                optimizer.zero_grad()
+                y_pred = self.model(X_batch)
+                loss = criterion(y_pred, y_batch.unsqueeze(1))
+                loss.backward()
+                optimizer.step()
+                train_loss += loss.item()
+            
+            # Validation
+            self.model.eval()
+            val_loss = 0
+            y_true, y_pred = [], []
+            with torch.no_grad():
+                for X_batch, y_batch in test_loader:
+                    batch_pred = self.model(X_batch)
+                    val_loss += criterion(batch_pred, y_batch.unsqueeze(1)).item()
+                    y_true.extend(y_batch.numpy())
+                    y_pred.extend(batch_pred.squeeze().numpy())
+            
+            # Early stopping
+            if val_loss < best_loss:
+                best_loss = val_loss
+                patience_counter = 0
+            else:
+                patience_counter += 1
+                if patience_counter >= patience:
+                    logger.info(f"Early stopping at epoch {epoch}")
+                    break
+            
+            if epoch % 10 == 0:
+                logger.info(f"Epoch {epoch}: Train Loss = {train_loss/len(train_loader):.4f}, "
+                          f"Val Loss = {val_loss/len(test_loader):.4f}")
+        
+        # Final evaluation
+        metrics = self._calculate_metrics(np.array(y_true), np.array(y_pred))
+        return metrics
+    def _get_param_grid(self) -> Optional[Dict]:
+        """
+        Get hyperparameter grid for model tuning.
+        """
+        if self.model_type == 'random_forest':
+            return {
+                'n_estimators': [50, 100, 200],
+                'max_depth': [None, 10, 20],
+                'min_samples_split': [2, 5, 10]
+            }
+        elif self.model_type == 'gradient_boosting':
+            return {
+                'n_estimators': [50, 100, 200],
+                'learning_rate': [0.01, 0.1, 0.3],
+                'max_depth': [3, 5, 7]
+            }
+        elif self.model_type == 'neural_net':
+            return {
+                'hidden_layer_sizes': [(50,), (100,), (50, 25), (100, 50)],
+                'alpha': [0.0001, 0.001, 0.01],
+                'learning_rate_init': [0.001, 0.01]
+            }
+        return None
+
+    def _calculate_metrics(self, y_true: np.ndarray, y_pred: np.ndarray) -> Dict:
+        """
+        Calculate comprehensive evaluation metrics.
+        """
+        return {
+            'MAE': mean_absolute_error(y_true, y_pred),
+            'RMSE': np.sqrt(mean_squared_error(y_true, y_pred)),
+            'R2': r2_score(y_true, y_pred),
+            'Max Error': np.max(np.abs(y_true - y_pred)),
+            'Within 1 Gate': np.mean(np.abs(y_true - y_pred) <= 1) * 100,
+            'Within 2 Gates': np.mean(np.abs(y_true - y_pred) <= 2) * 100
+        }
+
+    def visualize_results(self, X: pd.DataFrame, y_true: np.ndarray, save_dir: Optional[str] = None):
+        """
+        Generate comprehensive visualizations of the results with NaN handling.
+        """
+        if save_dir:
+            Path(save_dir).mkdir(parents=True, exist_ok=True)
+
+        # 1. Feature Importance Plot
+        if self.feature_importance is not None:
+            plt.figure(figsize=(12, 6))
+            importance_df = pd.DataFrame({
+                'feature': list(self.feature_importance.keys()),
+                'importance': list(self.feature_importance.values())
+            }).sort_values('importance', ascending=False)
+
+            sns.barplot(data=importance_df.head(15), x='importance', y='feature')
+            plt.title('Top 15 Most Important Features')
+            plt.tight_layout()
+            if save_dir:
+                plt.savefig(f"{save_dir}/feature_importance.png")
+            plt.close()
+
+        # 2. Prediction vs Actual Plot
+        y_pred = self.predict_batch(X)
+        plt.figure(figsize=(10, 6))
+        plt.scatter(y_true, y_pred, alpha=0.5)
+        plt.plot([y_true.min(), y_true.max()], [y_true.min(), y_true.max()], 'r--')
+        plt.xlabel('Actual Depth')
+        plt.ylabel('Predicted Depth')
+        plt.title('Prediction vs Actual Comparison')
+        if save_dir:
+            plt.savefig(f"{save_dir}/prediction_vs_actual.png")
+        plt.close()
+
+        # 3. Error Distribution
+        errors = y_pred - y_true
+        plt.figure(figsize=(10, 6))
+        sns.histplot(errors, bins=30)
+        plt.xlabel('Prediction Error (gates)')
+        plt.ylabel('Count')
+        plt.title('Error Distribution')
+        if save_dir:
+            plt.savefig(f"{save_dir}/error_distribution.png")
+        plt.close()
+
+        # 4. Feature Correlation Matrix - Fixed NaN handling
+        plt.figure(figsize=(12, 10))
+
+        # Calculate correlation matrix and handle NaN values
+        correlation = X.corr()
+
+        # Replace NaN values with 0 for visualization
+        correlation_clean = correlation.fillna(0)
+
+        # Create mask for upper triangle
+        mask = np.triu(np.ones_like(correlation_clean), k=1)
+
+        # Plot correlation matrix with modified parameters
+        sns.heatmap(
+            correlation_clean,
+            mask=mask,
+            annot=False,
+            cmap='coolwarm',
+            center=0,
+            vmin=-1,
+            vmax=1,
+            square=True,
+            cbar_kws={"shrink": .5}
+        )
+        plt.title('Feature Correlation Matrix')
+        plt.tight_layout()
+        if save_dir:
+            plt.savefig(f"{save_dir}/feature_correlation.png")
+        plt.close()
+
+    def predict_batch(self, X: pd.DataFrame) -> np.ndarray:
+        """
+        Make predictions for multiple inputs.
+        """
+        X_scaled = self.scaler.transform(X)
+        if self.model_type == 'deep_net':
+            self.model.eval()
+            with torch.no_grad():
+                X_tensor = torch.FloatTensor(X_scaled)
+                predictions = self.model(X_tensor).numpy().squeeze()
+            return predictions
+        return self.model.predict(X_scaled)
+
+    def save_model(self, path: str):
+        """
+        Save the trained model and associated data.
+        """
+        model_data = {
+            'model_type': self.model_type,
+            'scaler': self.scaler,
+            'feature_importance': self.feature_importance
+        }
+        
+        if self.model_type == 'deep_net':
+            torch.save({
+                'model_state_dict': self.model.state_dict(),
+                'model_data': model_data
+            }, path)
+        else:
+            model_data['model'] = self.model
+            with open(path, 'wb') as f:
+                import pickle
+                pickle.dump(model_data, f)
+
+    @classmethod
+    def load_model(cls, path: str):
+        """
+        Load a saved model.
+        """
+        if path.endswith('.pt'):  # PyTorch model
+            checkpoint = torch.load(path)
+            predictor = cls(model_type='deep_net')
+            predictor.model.load_state_dict(checkpoint['model_state_dict'])
+            model_data = checkpoint['model_data']
+        else:  # Other models
+            with open(path, 'rb') as f:
+                import pickle
+                model_data = pickle.load(f)
+            
+            predictor = cls(model_type=model_data['model_type'])
+            predictor.model = model_data['model']
+            
+        predictor.scaler = model_data['scaler']
+        predictor.feature_importance = model_data['feature_importance']
+        return predictor
+    
+    def generate_diverse_rtl_examples():
+        examples = []
+        depths = []
+
+        # Example 1: Simple AND
+        examples.append("result <= a & b;")  # depth 1
+        depths.append(1)
+
+        # Example 2: Two-level logic
+        examples.append("result <= (a & b) | c;")  # depth 2
+        depths.append(2)
+
+        # Example 3: Three-level logic
+        examples.append("result <= (a & b) | (c ^ d);")  # depth 2
+        depths.append(2)
+
+        return examples, depths
+    
+    def validate_prediction(rtl_code, predicted_depth):
+        # Count levels of operators
+        operators = re.findall(r'[&|^~]', rtl_code)
+        min_possible_depth = 1
+        max_possible_depth = len(operators)
+
+        if not (min_possible_depth <= predicted_depth <= max_possible_depth):
+            print(f"Warning: Predicted depth {predicted_depth} may be unrealistic")
+            print(f"Expected range: {min_possible_depth} to {max_possible_depth}")
+            
+
+def main():
+    """
+    Example usage of the enhanced RTL depth predictor.
+    """
+    # Example RTL code (simplified for demonstration)
+    example_rtl = """
+    module example(
+        input clk,
+        input [7:0] a, b, c,
+        output reg [7:0] result
+    );
+        always @(posedge clk) begin
+            if (a > b) begin
+                result <= (a & b) | (b ^ c);
+            end else begin
+                result <= (a | b) & (~c);
+            end
+        end
+    endmodule
+    """
+    
+    # Create synthetic dataset
+    rtl_files = [example_rtl] * 100
+    target_signals = ['result'] * 100
+    actual_depths = np.random.randint(2, 10, size=100)
+    
+    # Initialize and train predictor
+    predictor = EnhancedRTLDepthPredictor(model_type='random_forest')
+    X, y = predictor.prepare_advanced_dataset(rtl_files, target_signals, actual_depths)
+    
+    # Train and evaluate
+    metrics = predictor.train(X, y)
+    print("Training metrics:", metrics)
+    
+    # Generate visualizations
+    predictor.visualize_results(X, y, save_dir='rtl_analysis_results')
+    
+    # Save model
+    predictor.save_model('rtl_depth_predictor.pkl')
+    
+    # Make prediction for new RTL
+    new_depth = predictor.predict_batch(X[:1])[0]
+    print(f"Predicted combinational depth for 'result': {new_depth}")
+
+if __name__ == "__main__":
+    main()

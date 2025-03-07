@@ -31,8 +31,6 @@ The algorithm extracts over 30 distinct features from RTL code:
 Multiple models are implemented and compared:
 - Random Forest (best overall performance)
 - Gradient Boosting
-- Neural Networks
-- Deep Networks
 
 ### Performance Metrics
 

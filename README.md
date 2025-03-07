@@ -40,8 +40,6 @@ Multiple models are implemented and compared:
 |------------------|------|------|------|--------------------|---------------------|
 | Random Forest   | 0.45 | 0.67 | 0.92 | 85.3               | 97.2                |
 | Gradient Boosting | 0.49 | 0.71 | 0.91 | 83.7               | 96.5                |
-| Neural Network  | 0.53 | 0.78 | 0.89 | 81.2               | 95.8                |
-| Deep Network    | 0.50 | 0.73 | 0.90 | 82.5               | 96.1                |
 
 ## Complexity Analysis
 - **Time complexity**: O(n) for feature extraction where n is the code size
@@ -94,7 +92,7 @@ The predictor returns:
 - Visualization of key features and their importance
 
 ### Parameters
-- `model_type`: Type of model to use ('random_forest', 'gradient_boosting', 'neural_net', 'deep_net')
+- `model_type`: Type of model to use ('random_forest', 'gradient_boosting')
 - `deep_learning_params`: Configuration for deep learning models (epochs, learning rate, etc.)
 
 ## Visualization Tools

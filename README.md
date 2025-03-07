@@ -91,7 +91,6 @@ The predictor returns:
 
 ### Parameters
 - `model_type`: Type of model to use ('random_forest', 'gradient_boosting')
-- `deep_learning_params`: Configuration for deep learning models (epochs, learning rate, etc.)
 
 ## Visualization Tools
 The package includes visualization modules to help designers understand:
